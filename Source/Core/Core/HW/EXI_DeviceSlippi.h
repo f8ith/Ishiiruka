@@ -4,14 +4,14 @@
 
 #pragma once
 
-#include <SlippiGame.h>
+#include <SlippiLib/SlippiGame.h>
 
 #include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
 #include "Core/HW/EXI_Device.h"
 #include "Core/Slippi/SlippiDirectCodes.h"
+#include "Core/Slippi/SlippiExiTypes.h"
 #include "Core/Slippi/SlippiGameFileLoader.h"
-#include "Core/Slippi/SlippiGameReporter.h"
 #include "Core/Slippi/SlippiMatchmaking.h"
 #include "Core/Slippi/SlippiNetplay.h"
 #include "Core/Slippi/SlippiReplayComm.h"
@@ -21,6 +21,7 @@
 
 #define ROLLBACK_MAX_FRAMES 7
 #define MAX_NAME_LENGTH 15
+#define MAX_MESSAGE_LENGTH 25
 #define CONNECT_CODE_LENGTH 8
 
 extern bool g_needInputForFrame;
@@ -34,6 +35,10 @@ class CEXISlippi : public IEXIDevice
 
 	void DMAWrite(u32 _uAddr, u32 _uSize) override;
 	void DMARead(u32 addr, u32 size) override;
+
+	void ConfigureJukebox();
+	void SetJukeboxDolphinSystemVolume();
+	void SetJukeboxDolphinMusicVolume();
 
 	bool IsPresent() const override;
 
@@ -73,8 +78,12 @@ class CEXISlippi : public IEXIDevice
 		CMD_SEND_CHAT_MESSAGE = 0xBB,
 		CMD_GET_NEW_SEED = 0xBC,
 		CMD_REPORT_GAME = 0xBD,
-
 		CMD_FETCH_CODE_SUGGESTION = 0xBE,
+		CMD_OVERWRITE_SELECTIONS = 0xBF,
+		CMD_GP_COMPLETE_STEP = 0xC0,
+		CMD_GP_FETCH_STEP = 0xC1,
+		CMD_REPORT_SET_COMPLETE = 0xC2,
+		CMD_GET_PLAYER_SETTINGS = 0xC3,
 
 		// Misc
 		CMD_LOG_MESSAGE = 0xD0,
@@ -83,6 +92,9 @@ class CEXISlippi : public IEXIDevice
 		CMD_GCT_LENGTH = 0xD3,
 		CMD_GCT_LOAD = 0xD4,
 		CMD_GET_DELAY = 0xD5,
+		CMD_PLAY_MUSIC = 0xD6,
+		CMD_STOP_MUSIC = 0xD7,
+		CMD_CHANGE_MUSIC_VOLUME = 0xD8,
 		CMD_PREMADE_TEXT_LENGTH = 0xE1,
 		CMD_PREMADE_TEXT_LOAD = 0xE2,
 	};
@@ -102,8 +114,8 @@ class CEXISlippi : public IEXIDevice
 	    {CMD_RECEIVE_COMMANDS, 1},
 
 	    // The following are all commands used to play back a replay and
-	    // have fixed sizes
-	    {CMD_PREPARE_REPLAY, 0},
+	    // have fixed sizes unless otherwise specified
+	    {CMD_PREPARE_REPLAY, 0xFFFF}, // Variable size... will only work if by itself
 	    {CMD_READ_FRAME, 4},
 	    {CMD_IS_STOCK_STEAL, 5},
 	    {CMD_GET_LOCATION, 6},
@@ -111,7 +123,7 @@ class CEXISlippi : public IEXIDevice
 	    {CMD_GET_GECKO_CODES, 0},
 
 	    // The following are used for Slippi online and also have fixed sizes
-	    {CMD_ONLINE_INPUTS, 21},
+	    {CMD_ONLINE_INPUTS, 25},
 	    {CMD_CAPTURE_SAVESTATE, 32},
 	    {CMD_LOAD_SAVESTATE, 32},
 	    {CMD_GET_MATCH_STATE, 0},
@@ -124,9 +136,13 @@ class CEXISlippi : public IEXIDevice
 	    {CMD_GET_ONLINE_STATUS, 0},
 	    {CMD_CLEANUP_CONNECTION, 0},
 	    {CMD_GET_NEW_SEED, 0},
-	    {CMD_REPORT_GAME, 16},
-
+	    {CMD_REPORT_GAME, static_cast<u32>(sizeof(SlippiExiTypes::ReportGameQuery) - 1)},
 	    {CMD_FETCH_CODE_SUGGESTION, 31},
+	    {CMD_OVERWRITE_SELECTIONS, static_cast<u32>(sizeof(SlippiExiTypes::OverwriteSelectionsQuery) - 1)},
+	    {CMD_GP_COMPLETE_STEP, static_cast<u32>(sizeof(SlippiExiTypes::GpCompleteStepQuery) - 1)},
+	    {CMD_GP_FETCH_STEP, static_cast<u32>(sizeof(SlippiExiTypes::GpFetchStepQuery) - 1)},
+	    {CMD_REPORT_SET_COMPLETE, static_cast<u32>(sizeof(SlippiExiTypes::ReportSetCompletionQuery) - 1)},
+	    {CMD_GET_PLAYER_SETTINGS, 0},
 
 	    // Misc
 	    {CMD_LOG_MESSAGE, 0xFFFF}, // Variable size... will only work if by itself
@@ -135,6 +151,9 @@ class CEXISlippi : public IEXIDevice
 	    {CMD_GCT_LENGTH, 0x0},
 	    {CMD_GCT_LOAD, 0x4},
 	    {CMD_GET_DELAY, 0x0},
+	    {CMD_PLAY_MUSIC, static_cast<u32>(sizeof(SlippiExiTypes::PlayMusicQuery) - 1)},
+	    {CMD_STOP_MUSIC, 0x0},
+	    {CMD_CHANGE_MUSIC_VOLUME, static_cast<u32>(sizeof(SlippiExiTypes::ChangeMusicVolumeQuery) - 1)},
 	    {CMD_PREMADE_TEXT_LENGTH, 0x2},
 	    {CMD_PREMADE_TEXT_LOAD, 0x2},
 	};
@@ -144,6 +163,10 @@ class CEXISlippi : public IEXIDevice
 		std::vector<u8> data;
 		std::string operation;
 	};
+
+	// A pointer to a "shadow" EXI Device that lives on the Rust side of things.
+	// This should be cleaned up in any destructor!
+	uintptr_t slprs_exi_device_ptr;
 
 	// .slp File creation stuff
 	u32 writtenByteCount = 0;
@@ -166,7 +189,6 @@ class CEXISlippi : public IEXIDevice
 	void closeFile();
 	std::string generateFileName();
 	bool checkFrameFullyFetched(s32 frameIndex);
-	bool shouldFFWFrame(s32 frameIndex);
 
 	// std::ofstream log;
 
@@ -179,7 +201,7 @@ class CEXISlippi : public IEXIDevice
 	bool isSlippiChatEnabled();
 	void handleOnlineInputs(u8 *payload);
 	void prepareOpponentInputs(s32 frame, bool shouldSkip);
-	void handleSendInputs(u8 *payload);
+	void handleSendInputs(s32 frame, u8 delay, s32 checksumFrame, u32 checksum, u8 *inputs);
 	void handleCaptureSavestate(u8 *payload);
 	void handleLoadSavestate(u8 *payload);
 	void handleNameEntryLoad(u8 *payload);
@@ -194,7 +216,12 @@ class CEXISlippi : public IEXIDevice
 	void prepareOnlineStatus();
 	void handleConnectionCleanup();
 	void prepareNewSeed();
-	void handleReportGame(u8 *payload);
+	void handleReportGame(const SlippiExiTypes::ReportGameQuery &query);
+	void handleOverwriteSelections(const SlippiExiTypes::OverwriteSelectionsQuery &query);
+	void handleGamePrepStepComplete(const SlippiExiTypes::GpCompleteStepQuery &query);
+	void prepareGamePrepOppStep(const SlippiExiTypes::GpFetchStepQuery &query);
+	void handleCompleteSet(const SlippiExiTypes::ReportSetCompletionQuery &query);
+	void handleGetPlayerSettings();
 
 	// replay playback stuff
 	void prepareGameInfo(u8 *payload);
@@ -220,8 +247,6 @@ class CEXISlippi : public IEXIDevice
 
 	std::vector<u8> loadPremadeText(u8 *payload);
 
-	int getCharColor(u8 charId, u8 teamId);
-
 	void FileWriteThread(void);
 
 	Common::FifoQueue<std::unique_ptr<WriteMessage>, false> fileWriteQueue;
@@ -240,8 +265,12 @@ class CEXISlippi : public IEXIDevice
 	std::unique_ptr<Slippi::SlippiGame> m_current_game = nullptr;
 	SlippiSpectateServer *m_slippiserver = nullptr;
 	SlippiMatchmaking::MatchSearchSettings lastSearch;
+	SlippiMatchmaking::MatchmakeResult recentMmResult;
 
 	std::vector<u16> stagePool;
+
+	// Used by ranked to set game prep selections
+	std::vector<SlippiPlayerSelections> overwrite_selections;
 
 	u32 frameSeqIdx = 0;
 
@@ -279,7 +308,6 @@ class CEXISlippi : public IEXIDevice
 	std::unique_ptr<SlippiGameFileLoader> gameFileLoader;
 	std::unique_ptr<SlippiNetplayClient> slippi_netplay;
 	std::unique_ptr<SlippiMatchmaking> matchmaking;
-	std::unique_ptr<SlippiGameReporter> gameReporter;
 	std::unique_ptr<SlippiDirectCodes> directCodes;
 	std::unique_ptr<SlippiDirectCodes> teamsCodes;
 
